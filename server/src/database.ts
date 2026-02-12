@@ -1,58 +1,79 @@
-import Database from 'better-sqlite3';
-import path from 'path';
+import { Pool, PoolClient } from 'pg';
 import { GameType, GameResult, GameStats, LeaderboardEntry } from './types';
 
 export class GameDatabase {
-  private db: Database.Database;
+  private pool: Pool;
 
   constructor() {
-    this.db = new Database(path.join(__dirname, '..', 'game_stats.db'));
+    // Берем строку подключения из переменных окружения или кидаем ошибку
+    if (!process.env.DATABASE_URL) {
+      throw new Error('DATABASE_URL environment variable is not set');
+    }
+
+    this.pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false } // Нужно для Neon
+    });
+
     this.initTables();
   }
 
-  private initTables(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS players (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+  private async initTables(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS players (
+          id SERIAL PRIMARY KEY,
+          name TEXT UNIQUE NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
 
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS game_stats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        player_name TEXT NOT NULL,
-        game_type TEXT NOT NULL,
-        result TEXT NOT NULL,
-        opponent_name TEXT,
-        played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (player_name) REFERENCES players(name)
-      )
-    `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS game_stats (
+          id SERIAL PRIMARY KEY,
+          player_name TEXT NOT NULL,
+          game_type TEXT NOT NULL,
+          result TEXT NOT NULL,
+          opponent_name TEXT,
+          played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (player_name) REFERENCES players(name)
+        )
+      `);
+      console.log('✅ Tables initialized');
+    } finally {
+      client.release();
+    }
   }
 
-  getOrCreatePlayer(name: string): any {
-    const stmt = this.db.prepare('INSERT OR IGNORE INTO players (name) VALUES (?)');
-    stmt.run(name);
-    return this.db.prepare('SELECT * FROM players WHERE name = ?').get(name);
+  async getOrCreatePlayer(name: string): Promise<any> {
+    // Postgres аналог "INSERT OR IGNORE"
+    await this.pool.query(
+      'INSERT INTO players (name) VALUES ($1) ON CONFLICT (name) DO NOTHING',
+      [name]
+    );
+    
+    const res = await this.pool.query(
+      'SELECT * FROM players WHERE name = $1',
+      [name]
+    );
+    return res.rows[0];
   }
 
-  recordGame(
+  async recordGame(
     playerName: string,
     gameType: GameType,
     result: GameResult,
     opponentName: string | null = null
-  ): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO game_stats (player_name, game_type, result, opponent_name)
-      VALUES (?, ?, ?, ?)
-    `);
-    stmt.run(playerName, gameType, result, opponentName);
+  ): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO game_stats (player_name, game_type, result, opponent_name) VALUES ($1, $2, $3, $4)',
+      [playerName, gameType, result, opponentName]
+    );
   }
 
-  getPlayerStats(name: string): GameStats[] {
-    const stats = this.db.prepare(`
+  async getPlayerStats(name: string): Promise<GameStats[]> {
+    const query = `
       SELECT
         game_type,
         COUNT(*) as total_games,
@@ -60,14 +81,15 @@ export class GameDatabase {
         SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
         SUM(CASE WHEN result = 'draw' THEN 1 ELSE 0 END) as draws
       FROM game_stats
-      WHERE player_name = ?
+      WHERE player_name = $1
       GROUP BY game_type
-    `).all(name) as GameStats[];
-
-    return stats;
+    `;
+    
+    const res = await this.pool.query(query, [name]);
+    return res.rows as GameStats[];
   }
 
-  getLeaderboard(gameType: GameType | null = null): LeaderboardEntry[] {
+  async getLeaderboard(gameType: GameType | null = null): Promise<LeaderboardEntry[]> {
     let query = `
       SELECT
         player_name,
@@ -78,8 +100,11 @@ export class GameDatabase {
       FROM game_stats
     `;
 
+    const params: any[] = [];
+
     if (gameType) {
-      query += ` WHERE game_type = ?`;
+      query += ` WHERE game_type = $1`;
+      params.push(gameType);
     }
 
     query += `
@@ -88,11 +113,11 @@ export class GameDatabase {
       LIMIT 10
     `;
 
-    const stmt = this.db.prepare(query);
-    return (gameType ? stmt.all(gameType) : stmt.all()) as LeaderboardEntry[];
+    const res = await this.pool.query(query, params);
+    return res.rows as LeaderboardEntry[];
   }
 
-  close(): void {
-    this.db.close();
+  async close(): Promise<void> {
+    await this.pool.end();
   }
 }
