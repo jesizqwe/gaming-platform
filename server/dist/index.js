@@ -14,7 +14,7 @@ const app = (0, express_1.default)();
 const server = http_1.default.createServer(app);
 const io = new socket_io_1.Server(server, {
     cors: {
-        origin: 'http://localhost:5173',
+        origin: ['http://localhost:5173', 'https://gaming-platform-two.vercel.app'],
         methods: ['GET', 'POST']
     }
 });
@@ -114,7 +114,7 @@ function makeAIMove(session) {
         }
     }
 }
-function endGame(session, winner, forfeit = false) {
+async function endGame(session, winner, forfeit = false) {
     const result = {
         winner: winner === 'draw' ? null : winner,
         isDraw: winner === 'draw',
@@ -126,11 +126,11 @@ function endGame(session, winner, forfeit = false) {
     if (session.player2) {
         if (!session.vsAI || winner !== 'AI') {
             const player1Result = winner === session.player1.name ? 'win' : (winner === 'draw' ? 'draw' : 'loss');
-            db.recordGame(session.player1.name, session.gameType, player1Result, session.player2.name);
+            await db.recordGame(session.player1.name, session.gameType, player1Result, session.player2.name);
         }
         if (session.player2.name !== 'AI') {
             const player2Result = winner === session.player2.name ? 'win' : (winner === 'draw' ? 'draw' : 'loss');
-            db.recordGame(session.player2.name, session.gameType, player2Result, session.player1.name);
+            await db.recordGame(session.player2.name, session.gameType, player2Result, session.player1.name);
         }
     }
     session.state = 'finished';
@@ -142,19 +142,19 @@ function endGame(session, winner, forfeit = false) {
 // Socket.io connection handling
 io.on('connection', (socket) => {
     console.log('New client connected:', socket.id);
-    socket.on('setPlayerName', (playerName) => {
+    socket.on('setPlayerName', async (playerName) => {
         socket.data.playerName = playerName;
         playerSockets.set(playerName, socket.id);
-        db.getOrCreatePlayer(playerName);
+        await db.getOrCreatePlayer(playerName);
         socket.emit('nameSet', { success: true, name: playerName });
         console.log(`Player ${playerName} connected with socket ${socket.id}`);
     });
-    socket.on('getStats', (playerName) => {
-        const stats = db.getPlayerStats(playerName);
+    socket.on('getStats', async (playerName) => {
+        const stats = await db.getPlayerStats(playerName);
         socket.emit('statsUpdate', stats);
     });
-    socket.on('getLeaderboard', (gameType) => {
-        const leaderboard = db.getLeaderboard(gameType || null);
+    socket.on('getLeaderboard', async (gameType) => {
+        const leaderboard = await db.getLeaderboard(gameType || null);
         socket.emit('leaderboardUpdate', leaderboard);
     });
     socket.on('getSessions', () => {
